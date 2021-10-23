@@ -1,0 +1,9 @@
+kernel/*.o 
+kernel/*.ko
+kernel/.cache.mk
+kernel/modules.* 
+kernel/Module.* 
+kernel/.*.mod.o.* 
+kernel/.*.cmd
+kernel/*.mod.*
+kernel/.tmp_versions

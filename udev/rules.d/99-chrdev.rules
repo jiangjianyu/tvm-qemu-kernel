@@ -1,0 +1,3 @@
+# Rules file for the chrdev device driver
+KERNEL=="tvm-vta-0", SUBSYSTEM=="tvm-vta", MODE="0666"
+
