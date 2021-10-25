@@ -64,6 +64,7 @@ DMA:
 // Author of EDU: Ilies CHERGUI <ilies.chergui@gmail.com> 
 
 #define BAR 0
+#define BAR_RAM 1
 #define CDEV_NAME "tvm-vta"
 #define VTA_DEVICE_ID 0x11e9
 #define IO_IRQ_ACK 0x64
@@ -312,9 +313,10 @@ static int pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	}
 	mmio = pci_iomap(pdev, BAR, pci_resource_len(pdev, BAR));
 	ctrl_mmio = mmio;
-	pfn_dev_mem = __phys_to_pfn(pci_resource_start(pdev, BAR)) + VTA_CONTROL_PAGE;
+	pfn_dev_mem = __phys_to_pfn(pci_resource_start(pdev, BAR_RAM));
 
 	pr_info("bar 0 size %llx\n", pci_resource_len(pdev, BAR));
+	pr_info("bar 1 size %llx\n", pci_resource_len(pdev, BAR_RAM));
 
 	/* IRQ setup. */
 	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &val);
@@ -324,7 +326,7 @@ static int pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		goto error;
 	}
 
-	total_slice = (pci_resource_len(pdev, BAR) / 4096 - VTA_CONTROL_PAGE) / DRAM_PAGE_PER_SLICE;
+	total_slice = (pci_resource_len(pdev, BAR_RAM) / 4096) / DRAM_PAGE_PER_SLICE;
 	dram_used = kmalloc(sizeof(volatile int) * total_slice, __GFP_ZERO);
 
 	printk(KERN_INFO "DRAM has %d slices\n", total_slice);
