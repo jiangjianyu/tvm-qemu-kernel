@@ -103,6 +103,10 @@ static void __iomem *mmio;
 static void __iomem *ctrl_mmio;
 unsigned long pfn_dev_mem;
 
+volatile int *dram_used;
+int total_slice;
+#define DRAM_PAGE_PER_SLICE 32768
+
 void mmap_open(struct vm_area_struct *vma)
 {
     printk(KERN_DEBUG "Entering: mmap open %lx\n", (long)vma);
@@ -143,44 +147,89 @@ struct vm_operations_struct mmap_vm_ops = {
 	.fault = mmap_fault,
 };
 
+typedef struct {
+	int dram_slice_idx;
+	void __iomem *ctrl_mmio;
+} vta_user_t;
+
+int vta_open 	(struct inode *node, struct file *f) {
+	vta_user_t *user = (vta_user_t*)kmalloc(sizeof(vta_user_t), GFP_KERNEL);
+	f->private_data = user;
+	user->dram_slice_idx = -1;
+	return 0;
+}
+
+int vta_close 	(struct inode *node, struct file *f) {
+	vta_user_t *user = (vta_user_t*) (f->private_data);
+	if (user->dram_slice_idx != -1) {
+		dram_used[user->dram_slice_idx] = 0;
+		printk(KERN_ERR "Release dram to partition %d\n", user->dram_slice_idx);
+	}
+	kfree(f->private_data);
+	return 0;
+}
+
 int vta_mmap(struct file *filp, struct vm_area_struct *vma)
 {
     printk(KERN_DEBUG "Entering: vma %lx\n", (long)vma);
 	unsigned long vma_size = vma->vm_end - vma->vm_start;
-	if (vma_size >= VTA_DEV_MEM) {
+	int i;
+	if (vma_size > DRAM_PAGE_PER_SLICE * 4096) {
+		printk(KERN_DEBUG "Dram size overflows %ld\n", vma_size);
 		return 1;
 	}
     vma->vm_ops = &mmap_vm_ops;
     vma->vm_flags |= VM_IO;
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+
+	int old_value = 0;
+	for (i = 0;i < total_slice;i ++) {
+		if (cmpxchg(&dram_used[i], old_value, 1) == old_value) {
+			break;
+		}
+	}
+
+	vta_user_t *user = (vta_user_t*) (filp->private_data);
+
+	if (i == total_slice || user->dram_slice_idx != -1) {
+		printk(KERN_DEBUG "Dram has been mapped to %d\n", user->dram_slice_idx);
+		return 1;
+	}
+
+	user->dram_slice_idx = i;
+	user->ctrl_mmio = ctrl_mmio + (sizeof(u32) * 5) * i;
+
+	printk(KERN_ERR "Map dram to partition %d\n", user->dram_slice_idx);
 	return io_remap_pfn_range(vma, vma->vm_start, 
-		pfn_dev_mem, vma_size, vma->vm_page_prot);
+		pfn_dev_mem + i * DRAM_PAGE_PER_SLICE, vma_size, vma->vm_page_prot);
 }
 
-long device_exec(unsigned long long arg) {
+long device_exec(struct file* filp, unsigned long long arg) {
 	vta_exec_t exec;
+	vta_user_t *user = (vta_user_t*) (filp->private_data);
 	u32 status = 1;
 	if (copy_from_user(&exec, (const void*)arg, sizeof(exec)) != 0) {
         printk(KERN_ERR "Copy data to user failed\n");
         return -EFAULT;
     }
-	iowrite32(exec.data[0], ctrl_mmio + sizeof(u32) * 0);
-	iowrite32(exec.data[1], ctrl_mmio + sizeof(u32) * 1);
-	iowrite32(exec.data[2], ctrl_mmio + sizeof(u32) * 2);
-	iowrite32(status, ctrl_mmio + sizeof(u32) * 3);
+	iowrite32(exec.data[0], user->ctrl_mmio + sizeof(u32) * 0);
+	iowrite32(exec.data[1], user->ctrl_mmio + sizeof(u32) * 1);
+	iowrite32(exec.data[2], user->ctrl_mmio + sizeof(u32) * 2);
+	iowrite32(user->dram_slice_idx * DRAM_PAGE_PER_SLICE * 4096, user->ctrl_mmio + sizeof(u32) * 3);
+	iowrite32(status, user->ctrl_mmio + sizeof(u32) * 4);
 	while (1) {
-		status = ioread32(ctrl_mmio + sizeof(u32) * 3);
+		status = ioread32(user->ctrl_mmio + sizeof(u32) * 4);
 		if (status != 1)
 			break;
 	}
-	return ioread32(ctrl_mmio + sizeof(u32) * 3);
+	return ioread32(user->ctrl_mmio + sizeof(u32) * 4);
 }
 
 static long vta_ioctl (struct file *file, unsigned int cmd, unsigned long arg) {
     printk(KERN_DEBUG "Entering: %s\n", __func__);
     switch (cmd) {
         case IOCTL_TVM_VTA_CMD_EXEC:
-			return device_exec(arg);
+			return device_exec(file, arg);
         default:                                    break;
     }
     return 0;
@@ -194,6 +243,8 @@ static long vta_ioctl (struct file *file, unsigned int cmd, unsigned long arg) {
 static struct file_operations fops = {
 	.owner   = THIS_MODULE,
 	.mmap	 = vta_mmap,
+	.open	 = vta_open,
+	.release = vta_close,
 	.unlocked_ioctl = vta_ioctl
 };
 
@@ -272,6 +323,11 @@ static int pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		dev_err(&(dev->dev), "request_irq\n");
 		goto error;
 	}
+
+	total_slice = (pci_resource_len(pdev, BAR) / 4096 - VTA_CONTROL_PAGE) / DRAM_PAGE_PER_SLICE;
+	dram_used = kmalloc(sizeof(volatile int) * total_slice, __GFP_ZERO);
+
+	printk(KERN_INFO "DRAM has %d slices\n", total_slice);
 
 	return 0;
 error:
